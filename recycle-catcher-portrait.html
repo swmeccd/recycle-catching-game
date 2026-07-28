@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Recycle Catcher - Portrait</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; user-select:none; -webkit-user-select:none; touch-action:none; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#0d2b1f; font-family: 'Segoe UI', Arial, sans-serif; }
+  #gameContainer { position:relative; width:100%; height:100%; }
+  canvas { display:block; background: linear-gradient(#cfeee0, #eaf7ef); }
+
+  #hud {
+    position:absolute; top:0; left:0; right:0;
+    display:flex; justify-content:space-between; align-items:center;
+    padding:16px 24px; pointer-events:none;
+    color:#0d2b1f; font-weight:bold; font-size:22px;
+    text-shadow: 0 1px 2px rgba(255,255,255,0.6);
+  }
+  #livesDisplay { font-size:26px; letter-spacing:4px; }
+
+  #overlay {
+    position:absolute; inset:0; background:rgba(13,43,31,0.92);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    color:#fff; text-align:center; padding:20px;
+  }
+  #overlay h1 { font-size:42px; margin-bottom:10px; }
+  #overlay p { font-size:18px; margin-bottom:24px; opacity:0.9; max-width:480px; }
+  #overlay button {
+    background:#2e9e5b; color:#fff; border:none; padding:16px 40px;
+    font-size:20px; font-weight:bold; border-radius:50px; cursor:pointer;
+    box-shadow:0 4px 0 #1f7a43;
+  }
+  #overlay button:active { transform:translateY(2px); box-shadow:0 2px 0 #1f7a43; }
+  .hidden { display:none !important; }
+  #finalScore { font-size:64px; font-weight:bold; color:#a8f0c6; margin-bottom:6px; }
+
+  /* leaderboard button — smaller, ghost style */
+  .lb-btn {
+    background:transparent; border:2px solid rgba(255,255,255,0.35); color:rgba(255,255,255,0.75);
+    padding:10px 28px; font-size:16px; border-radius:50px; cursor:pointer; margin-top:12px;
+    box-shadow:none;
+  }
+  .lb-btn:active { opacity:0.6; }
+
+  /* name entry input */
+  #nameInput {
+    font-size:22px; padding:12px 20px; border-radius:12px;
+    border:2px solid #2e9e5b; background:rgba(255,255,255,0.1);
+    color:#fff; text-align:center; width:280px; margin-bottom:16px; outline:none;
+  }
+  #nameInput::placeholder { color:rgba(255,255,255,0.35); }
+
+  /* leaderboard table */
+  .lb-table { width:100%; max-width:420px; border-collapse:collapse; margin:10px 0 20px; }
+  .lb-table th { color:#a8f0c6; font-size:13px; padding:6px 12px; text-align:left; border-bottom:1px solid rgba(255,255,255,0.2); }
+  .lb-table td { padding:8px 12px; font-size:18px; border-bottom:1px solid rgba(255,255,255,0.07); }
+  .lb-table td:last-child { text-align:right; }
+  .lb-rank { color:rgba(255,255,255,0.35); font-size:13px; width:28px; }
+  .lb-table tr.highlight td { color:#a8f0c6; font-weight:bold; }
+</style>
+</head>
+<body>
+<div id="gameContainer">
+  <canvas id="game"></canvas>
+
+  <div id="hud">
+    <div id="scoreDisplay">Score: 0</div>
+    <div id="livesDisplay">❤️❤️❤️</div>
+  </div>
+
+  <div id="overlay">
+    <h1>♻️ Recycle Catcher</h1>
+    <p>Drag the bin to catch RECYCLABLES (+1).<br>
+       Avoid catching TRASH — you only get 3 mistakes!<br>
+       It gets faster the longer you survive. Good luck!</p>
+    <button id="startBtn">Start Game</button>
+    <button class="lb-btn" id="lbBtn">🏆 Leaderboard</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const scoreDisplay = document.getElementById('scoreDisplay');
+  const livesDisplay = document.getElementById('livesDisplay');
+
+  let W, H;
+  function resize(){
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---- Game constants ----
+  const MAX_STRIKES = 3;    // game ends after collecting this many trash items
+  const RAMP_DURATION = 30; // seconds — difficulty keeps scaling toward/past this point
+  // Portrait mode: bin is wider so it's still catchable on a narrower screen
+  const BIN_WIDTH_RATIO  = 0.38; // was 0.16 in landscape
+  const BIN_HEIGHT_RATIO = 0.08; // was 0.12 in landscape
+
+  // ---- Item size ----
+  // This is what you're looking for! 0.11 = 11% of the screen's shorter edge.
+  // Go higher (e.g. 0.14) for bigger items, lower (e.g. 0.08) for smaller.
+  const ITEM_SIZE_RATIO = 0.11;
+
+  // Item types: recyclable = good, trash = bad
+  // Put your image files in the SAME FOLDER as this HTML file, then change the
+  // "img" filenames below to match. PNG with transparent background works best.
+  const ITEM_TYPES = [
+    { type:'recyclable', img:'recycle1.png', color:'#2e9e5b', points:1 },
+    { type:'recyclable', img:'recycle2.png', color:'#2e9e5b', points:1 },
+    { type:'recyclable', img:'recycle3.png', color:'#2e9e5b', points:1 },
+    { type:'trash', img:'trash1.png', color:'#b33b3b', points:-1 },
+    { type:'trash', img:'trash2.png', color:'#b33b3b', points:-1 },
+    { type:'trash', img:'trash3.png', color:'#b33b3b', points:-1 },
+  ];
+
+  // Preload all images once at startup so they're ready when the game draws them
+  ITEM_TYPES.forEach(def => {
+    const image = new Image();
+    image.src = def.img;
+    def.image = image;
+  });
+
+  // ---- Bin image ----
+  // Replace 'bin.png' with your actual filename. PNG with transparent background works best.
+  // The image will be stretched to fit the bin hitbox, so a portrait-shaped image looks best.
+  const binImg = new Image();
+  binImg.src = 'bin.png';
+
+  // ============================================================
+  //  SOUND EFFECTS
+  //  The game generates placeholder tones by default — no files needed.
+  //  To use your own audio files, replace each function body like this:
+  //
+  //    function sfxCatch() { new Audio('sfx-catch.mp3').play().catch(()=>{}); }
+  //    function sfxTrash() { new Audio('sfx-trash.mp3').play().catch(()=>{}); }
+  //    function sfxWin()   { new Audio('sfx-win.mp3').play().catch(()=>{}); }
+  //    function sfxLose()  { new Audio('sfx-lose.mp3').play().catch(()=>{}); }
+  //
+  //  BACKGROUND MUSIC — uncomment and fill in your file path:
+  //    const bgMusic = new Audio('bg-music.mp3');
+  //    bgMusic.loop   = true;
+  //    bgMusic.volume = 0.35;
+  //    // then call bgMusic.play() inside startGame() and bgMusic.pause() inside endGame()
+  // ============================================================
+  let _audioCtx = null;
+  function _ac(){ return _audioCtx || (_audioCtx = new(window.AudioContext||window.webkitAudioContext)()); }
+  function _tone(freq, type='sine', dur=0.12, vol=0.22, delay=0){
+    try{
+      const ctx=_ac(), o=ctx.createOscillator(), g=ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type=type; o.frequency.setValueAtTime(freq, ctx.currentTime+delay);
+      g.gain.setValueAtTime(vol, ctx.currentTime+delay);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+delay+dur);
+      o.start(ctx.currentTime+delay); o.stop(ctx.currentTime+delay+dur+0.05);
+    }catch(e){}
+  }
+  // Catching a recyclable — happy two-note chime
+  function sfxCatch() { _tone(660,'sine',0.12,0.2); _tone(880,'sine',0.12,0.18,0.1); }
+  // Catching trash — low buzzy thud
+  function sfxTrash() { _tone(180,'sawtooth',0.28,0.25); }
+  // Game over, good score — little fanfare
+  function sfxWin()   { [523,659,784,1047].forEach((f,i)=>_tone(f,'sine',0.2,0.22,i*0.12)); }
+  // Game over, out of lives — descending fail sound
+  function sfxLose()  { _tone(300,'sawtooth',0.15,0.2); _tone(200,'sawtooth',0.3,0.25,0.15); }
+
+  let bin, items, score, strikes, lastSpawn, spawnInterval, running, animId, startTime;
+  let particles = [];
+
+  function initGame(){
+    bin = {
+      w: 0, h: 0, x: 0, y: 0
+    };
+    bin.w = W * BIN_WIDTH_RATIO;
+    bin.h = H * BIN_HEIGHT_RATIO;
+    bin.x = W/2 - bin.w/2;
+    bin.y = H - bin.h - 20;
+
+    items = [];
+    particles = [];
+    score = 0;
+    strikes = 0;
+    lastSpawn = 0;
+    spawnInterval = 1100; // ms, will decrease over time
+    running = true;
+    startTime = performance.now();
+
+    scoreDisplay.textContent = 'Score: 0';
+    updateLivesDisplay();
+  }
+
+  function updateLivesDisplay(){
+    // shows remaining lives as hearts, e.g. 3 left = ❤️❤️❤️, 1 left = ❤️🖤🖤
+    let hearts = '';
+    for(let i=0; i<MAX_STRIKES; i++){
+      hearts += (i < MAX_STRIKES - strikes) ? '❤️' : '🖤';
+    }
+    livesDisplay.textContent = hearts;
+  }
+
+  function spawnItem(progress){
+    // progress is elapsed-seconds / RAMP_DURATION — keeps climbing past 1.0
+    // the longer the player survives, so it never plateaus into "easy mode"
+    const def = ITEM_TYPES[Math.floor(Math.random()*ITEM_TYPES.length)];
+    const size = Math.min(W,H) * ITEM_SIZE_RATIO;
+    const baseSpeed = H * 0.18; // px per second baseline
+    const speed = baseSpeed * (1 + progress*2.6); // ~3.6x by 30s, keeps rising after
+    items.push({
+      x: Math.random() * (W - size) + size/2,
+      y: -size,
+      size,
+      speed,
+      def,
+      rotation: Math.random()*0.4 - 0.2,
+      caught: false
+    });
+  }
+
+  function spawnParticles(x, y, color, good){
+    for(let i=0;i<10;i++){
+      particles.push({
+        x, y,
+        vx: (Math.random()-0.5)*240,
+        vy: (Math.random()-0.8)*240,
+        life: 1,
+        color: good ? color : color
+      });
+    }
+  }
+
+  // ---- Input: drag bin ----
+  let dragging = false;
+  function pointerX(e){
+    if(e.touches && e.touches.length) return e.touches[0].clientX;
+    return e.clientX;
+  }
+  function setBinX(px){
+    bin.x = Math.max(0, Math.min(W - bin.w, px - bin.w/2));
+  }
+  canvas.addEventListener('pointerdown', (e)=>{
+    dragging = true;
+    setBinX(e.clientX);
+  });
+  canvas.addEventListener('pointermove', (e)=>{
+    if(dragging) setBinX(e.clientX);
+  });
+  window.addEventListener('pointerup', ()=> dragging=false);
+  // touch fallback
+  canvas.addEventListener('touchstart', (e)=>{ dragging=true; setBinX(pointerX(e)); }, {passive:true});
+  canvas.addEventListener('touchmove', (e)=>{ if(dragging) setBinX(pointerX(e)); }, {passive:true});
+  canvas.addEventListener('touchend', ()=> dragging=false);
+
+  // ---- Main loop ----
+  function loop(now){
+    if(!running) return;
+    const elapsed = (now - startTime)/1000;
+    // progress climbs past 1.0 after RAMP_DURATION seconds — difficulty never caps,
+    // so surviving much past ~30s becomes a real test of reflexes
+    const progress = elapsed / RAMP_DURATION;
+
+    // spawn logic - interval shrinks as progress increases, floors out at 220ms
+    const currentInterval = Math.max(220, spawnInterval * (1 - progress*0.8));
+    if(now - lastSpawn > currentInterval){
+      spawnItem(progress);
+      lastSpawn = now;
+    }
+
+    ctx.clearRect(0,0,W,H);
+
+    // ground line
+    ctx.fillStyle = 'rgba(13,43,31,0.08)';
+    ctx.fillRect(0, H-10, W, 10);
+
+    // update + draw items
+    for(let i = items.length-1; i>=0; i--){
+      const it = items[i];
+      it.y += it.speed * (1/60);
+      // collision with bin
+      if(!it.caught &&
+         it.y + it.size/2 > bin.y &&
+         it.y - it.size/2 < bin.y + bin.h &&
+         it.x > bin.x - it.size/2 &&
+         it.x < bin.x + bin.w + it.size/2){
+        it.caught = true;
+        score += it.def.points;
+        scoreDisplay.textContent = 'Score: ' + score;
+        spawnParticles(it.x, bin.y, it.def.color, it.def.points>0);
+        items.splice(i,1);
+
+        if(it.def.type === 'trash'){
+          sfxTrash();
+          strikes++;
+          updateLivesDisplay();
+          if(strikes >= MAX_STRIKES){
+            endGame();
+            return;
+          }
+        } else {
+          sfxCatch();
+        }
+        continue;
+      }
+      if(it.y - it.size/2 > H){
+        items.splice(i,1);
+        continue;
+      }
+      drawItem(it);
+    }
+
+    // particles
+    for(let i=particles.length-1;i>=0;i--){
+      const p = particles[i];
+      p.x += p.vx/60; p.y += p.vy/60; p.vy += 600/60; p.life -= 1/40;
+      if(p.life<=0){ particles.splice(i,1); continue; }
+      ctx.globalAlpha = Math.max(p.life,0);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4, 0, Math.PI*2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    drawBin();
+
+    animId = requestAnimationFrame(loop);
+  }
+
+  function drawItem(it){
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.rotation);
+    const img = it.def.image;
+    if(img && img.complete && img.naturalWidth > 0){
+      // draw image centered, sized to it.size
+      ctx.drawImage(img, -it.size/2, -it.size/2, it.size, it.size);
+    } else {
+      // fallback while image loads (or if missing): colored circle
+      ctx.fillStyle = it.def.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, it.size/2, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawBin(){
+    ctx.save();
+    if(binImg.complete && binImg.naturalWidth > 0){
+      // draw your bin image, stretched to fit the bin hitbox
+      ctx.drawImage(binImg, bin.x, bin.y, bin.w, bin.h);
+    } else {
+      // fallback: plain green rectangle if image is missing or still loading
+      const r = 10;
+      ctx.fillStyle = '#2e9e5b';
+      roundRect(ctx, bin.x, bin.y, bin.w, bin.h, r);
+      ctx.fill();
+      ctx.fillStyle = '#1f7a43';
+      roundRect(ctx, bin.x, bin.y, bin.w, bin.h*0.25, r);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = (bin.h*0.5) + 'px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('♻️', bin.x+bin.w/2, bin.y+bin.h*0.62);
+    }
+    ctx.restore();
+  }
+
+  function roundRect(ctx, x, y, w, h, r){
+    ctx.beginPath();
+    ctx.moveTo(x+r, y);
+    ctx.arcTo(x+w, y, x+w, y+h, r);
+    ctx.arcTo(x+w, y+h, x, y+h, r);
+    ctx.arcTo(x, y+h, x, y, r);
+    ctx.arcTo(x, y, x+w, y, r);
+    ctx.closePath();
+  }
+
+  // ---- Leaderboard ----
+  const LB_KEY = 'recycle-catcher-lb';
+  const LB_MAX = 10;
+
+  function loadLB(){ try{ return JSON.parse(localStorage.getItem(LB_KEY))||[]; }catch(e){ return []; } }
+  function saveLB(lb){ localStorage.setItem(LB_KEY, JSON.stringify(lb)); }
+
+  function addToLB(name, s){
+    const lb = loadLB();
+    const entry = { name: name.trim()||'Anonymous', score:s, ts:Date.now() };
+    lb.push(entry);
+    lb.sort((a,b)=>b.score-a.score);
+    lb.splice(LB_MAX);
+    saveLB(lb);
+    return { lb, newIdx: lb.findIndex(e=>e.ts===entry.ts) };
+  }
+
+  function showLeaderboard(lb, newIdx=-1){
+    const rows = lb.length ? lb.map((e,i)=>`
+      <tr class="${i===newIdx?'highlight':''}">
+        <td class="lb-rank">${i+1}</td>
+        <td>${e.name}</td>
+        <td>${e.score}</td>
+      </tr>`).join('') :
+      '<tr><td colspan="3" style="opacity:0.5;text-align:center;padding:16px">No scores yet!</td></tr>';
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `
+      <h1>🏆 Leaderboard</h1>
+      <table class="lb-table">
+        <thead><tr><th>#</th><th>Name</th><th style="text-align:right">Score</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <button id="playAgainBtn">Play Again</button>
+      <button class="lb-btn" id="backBtn">← Back to Menu</button>
+    `;
+    document.getElementById('playAgainBtn').addEventListener('click', startGame);
+    document.getElementById('backBtn').addEventListener('click', showStartScreen);
+  }
+
+  function showNameEntry(s){
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `
+      <h1>Out of Lives!</h1>
+      <div id="finalScore">${s}</div>
+      <p>${s >= 8 ? "Awesome! You're a recycling champion! 🌍" : s >= 3 ? "Nice job! Keep sorting right! ♻️" : "Keep practising your sorting skills!"}<br><br>Enter your name for the leaderboard:</p>
+      <input id="nameInput" type="text" maxlength="16" placeholder="Your name" />
+      <br>
+      <button id="submitName">Submit ✓</button>
+      <button class="lb-btn" id="skipName">Skip</button>
+    `;
+    const input = document.getElementById('nameInput');
+    const submit = ()=>{ const {lb,newIdx}=addToLB(input.value, s); showLeaderboard(lb,newIdx); };
+    document.getElementById('submitName').addEventListener('click', submit);
+    document.getElementById('skipName').addEventListener('click', ()=>showLeaderboard(loadLB()));
+    input.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+    setTimeout(()=>input.focus(), 100);
+  }
+
+  function showStartScreen(){
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `
+      <h1>♻️ Recycle Catcher</h1>
+      <p>Drag the bin to catch RECYCLABLES (+1).<br>
+         Avoid catching TRASH — you only get 3 mistakes!<br>
+         It gets faster the longer you survive. Good luck!</p>
+      <button id="startBtn">Start Game</button>
+      <button class="lb-btn" id="lbBtn">🏆 Leaderboard</button>
+    `;
+    document.getElementById('startBtn').addEventListener('click', startGame);
+    document.getElementById('lbBtn').addEventListener('click', ()=>showLeaderboard(loadLB()));
+  }
+
+  function endGame(){
+    running = false;
+    cancelAnimationFrame(animId);
+    if(score >= 8) sfxWin(); else sfxLose();
+    // bgMusic.pause();
+    setTimeout(()=>showNameEntry(score), 400);
+  }
+
+  function startGame(){
+    overlay.classList.add('hidden');
+    initGame();
+    // bgMusic.play();
+    animId = requestAnimationFrame(loop);
+  }
+
+  startBtn.addEventListener('click', startGame);
+  document.getElementById('lbBtn').addEventListener('click', ()=>showLeaderboard(loadLB()));
+
+})();
+</script>
+</body>
+</html>
